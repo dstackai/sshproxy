@@ -22,5 +22,5 @@ or `$DSTACK_SSHPROXY_HOST_KEYS` (concatenated key files contents). At least one 
 
 ```shell
 scripts/generate-host-keys.sh > .host_keys
-just run --host-key .host-key --api-token <token> ...
+just run --host-key .host-keys --api-token <token> ...
 ```

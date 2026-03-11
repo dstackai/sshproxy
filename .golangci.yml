@@ -1,0 +1,33 @@
+version: "2"
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - asciicheck
+    - bodyclose
+    - canonicalheader
+    - errname
+    - errorlint
+    - err113
+    - nilnil
+    - exhaustive
+    - modernize
+    - noctx
+    - whitespace
+
+formatters:
+  enable:
+    - gofumpt
+    - golines
+    - goimports
+  settings:
+    golines:
+      max-len: 120
+    goimports:
+      local-prefixes:
+        - github.com/dstackai/sshproxy

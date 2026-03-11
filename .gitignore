@@ -1,5 +1,8 @@
 .*
 !.gitignore
+!.justfile
+!.golangci.yml
+!.pre-commit-config.yaml
 
 build/
 

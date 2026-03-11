@@ -1,0 +1,33 @@
+name: Build Binary
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        required: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Build
+        run: |
+          scripts/build.sh build/dstack-sshproxy ${{ inputs.version }}
+      - id: upload
+        uses: actions/upload-artifact@v7
+        with:
+          name: dstack-sshproxy
+          path: build/dstack-sshproxy
+          retention-days: 1
+      - name: Report
+        run: |
+          echo 'version: ${{ inputs.version }}'
+          echo 'url: ${{ steps.upload.outputs.artifact-url }}'
+          echo 'digest: ${{ steps.upload.outputs.artifact-digest }}'

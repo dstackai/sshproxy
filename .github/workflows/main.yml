@@ -12,3 +12,7 @@ on:
 jobs:
   lint:
     uses: ./.github/workflows/reusable-lint.yml
+  build:
+    uses: ./.github/workflows/reusable-build.yml
+    with:
+      version: ${{ github.run_number }}

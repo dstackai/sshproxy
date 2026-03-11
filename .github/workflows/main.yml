@@ -1,0 +1,14 @@
+name: Main
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  lint:
+    uses: ./.github/workflows/reusable-lint.yml

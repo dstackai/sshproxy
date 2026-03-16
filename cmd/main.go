@@ -17,6 +17,7 @@ import (
 )
 
 const (
+	appName        = "dstack-sshproxy"
 	hostKeysEnvVar = "DSTACK_SSHPROXY_HOST_KEYS"
 	apiTokenEnvVar = "DSTACK_SSHPROXY_API_TOKEN"
 )
@@ -48,7 +49,7 @@ func mainInner() int {
 	)
 
 	cmd := &cli.Command{
-		Name:            "dstack-sshproxy",
+		Name:            appName,
 		Version:         sshproxy.Version,
 		Usage:           "SSH proxy for dstack jobs",
 		UsageText:       usageText,
@@ -114,6 +115,9 @@ func mainInner() int {
 			if err := log.SetLogLevel(logLevel); err != nil {
 				return err
 			}
+
+			logger = log.GetLogger(ctx)
+			logger.WithField("version", sshproxy.Version).Debug("starting " + appName)
 
 			dstackClient, err := dstack.NewClient(apiURL, apiToken, time.Duration(apiTimeout)*time.Second)
 			if err != nil {

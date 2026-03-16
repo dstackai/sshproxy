@@ -86,4 +86,4 @@ jobs:
         push: false
         tags: |
           dstackai/sshproxy:${{ needs.set-version.outputs.version }}
-          ${{ case(fromJSON(needs.set-version.outputs.latest), 'dstackai/sshproxy:latest', '' }}
+          ${{ case(fromJSON(needs.set-version.outputs.latest), 'dstackai/sshproxy:latest', '') }}

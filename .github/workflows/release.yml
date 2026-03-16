@@ -41,6 +41,9 @@ jobs:
           echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
           echo "latest=$latest" >> "$GITHUB_OUTPUT"
 
+  lint:
+    uses: ./.github/workflows/reusable-lint.yml
+
   build:
     needs: [set-version]
     uses: ./.github/workflows/reusable-build.yml
@@ -48,7 +51,7 @@ jobs:
       version: ${{ needs.set-version.outputs.version }}
 
   publish:
-    needs: [set-version, build]
+    needs: [set-version, lint, build]
     runs-on: ubuntu-latest
     steps:
     - uses: actions/download-artifact@v8
@@ -66,7 +69,7 @@ jobs:
         make_latest: ${{ fromJSON(needs.set-version.outputs.latest) }}
 
   docker:
-    needs: [set-version, build]
+    needs: [set-version, lint, build]
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v6

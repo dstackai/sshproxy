@@ -7,8 +7,10 @@ import (
 	"io"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -278,20 +280,62 @@ func handleConnectionError(ctx context.Context, err error) {
 		return
 	}
 
-	authErr, isAuthErr := errors.AsType[*ssh.ServerAuthError](err)
-	if !isAuthErr {
-		logger.WithError(err).Error("failed to handshake client")
+	if errors.Is(err, syscall.ECONNRESET) {
+		// For example, OpenSSH client may send RST during key exchange if the host keys have changed
+		logger.WithError(err).Debug("connection reset by client")
 		return
 	}
 
-	for _, err := range authErr.Errors {
-		if errors.Is(err, ErrUpstreamNotFound) {
-			logger.Debug("client requested unknown upstream")
+	if errors.Is(err, syscall.ETIMEDOUT) {
+		logger.WithError(err).Debug("client connection timed out")
+		return
+	}
+
+	if authErr, ok := errors.AsType[*ssh.ServerAuthError](err); ok {
+		for _, err := range authErr.Errors {
+			if errors.Is(err, ErrUpstreamNotFound) {
+				logger.Debug("client requested unknown upstream")
+				return
+			}
+		}
+
+		logger.WithError(err).Debug("client auth failed")
+		return
+	}
+
+	if algoErr, ok := errors.AsType[*ssh.AlgorithmNegotiationError](err); ok {
+		logger.WithField("offered", algoErr.RequestedAlgorithms).Debugf("no common algorithm for %s", algoErr.What)
+		return
+	}
+
+	if sshErr := getSSHError(err); sshErr != nil {
+		errMsg := sshErr.Error()
+
+		for _, msg := range [...]string{
+			// https://github.com/golang/crypto/blob/982eaa62dfb7273603b97fc1835561450096f3bd/ssh/transport.go#L369
+			"overflow reading version string",
+			// https://github.com/golang/crypto/blob/982eaa62dfb7273603b97fc1835561450096f3bd/ssh/messages.go#L385
+			// e.g., "unmarshal error for field Language of type disconnectMsg"
+			"unmarshal error",
+			// https://github.com/golang/crypto/blob/982eaa62dfb7273603b97fc1835561450096f3bd/ssh/common.go#L382
+			"unexpected message type",
+		} {
+			if strings.Contains(errMsg, msg) {
+				logger.WithError(err).Debug("suspicious client")
+				return
+			}
+		}
+
+		// https://github.com/golang/crypto/blob/982eaa62dfb7273603b97fc1835561450096f3bd/ssh/messages.go#L47
+		// e.g., "ssh: disconnect, reason 11: disconnected by user"
+		// Most probably this is also a suspicious client, but may be a legitimate use of SSH_MSG_DISCONNECT
+		if strings.Contains(errMsg, "disconnect, reason") {
+			logger.WithError(err).Debug("client disconnected")
 			return
 		}
 	}
 
-	logger.WithError(err).Debug("client auth failed")
+	logger.WithError(err).Error("failed to handshake client")
 }
 
 func connectToUpstream(
@@ -457,4 +501,18 @@ func bridgeChannelRequests(ctx context.Context, dir direction, inReqs <-chan *ss
 
 func isClosedError(err error) bool {
 	return errors.Is(err, net.ErrClosed) || errors.Is(err, io.EOF)
+}
+
+func getSSHError(err error) error {
+	for {
+		if strings.HasPrefix(err.Error(), "ssh: ") {
+			return err
+		}
+		err = errors.Unwrap(err)
+		if err == nil {
+			break
+		}
+	}
+
+	return nil
 }

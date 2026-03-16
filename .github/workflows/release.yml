@@ -40,11 +40,21 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
           echo "latest=$latest" >> "$GITHUB_OUTPUT"
-  report:
+
+  build:
     needs: [set-version]
+    uses: ./.github/workflows/reusable-build.yml
+    with:
+      version: ${{ needs.set-version.outputs.version }}
+
+  report:
+    needs: [build]
     runs-on: ubuntu-latest
     steps:
-      - run: |
-          echo version: ${{ needs.set-version.outputs.version }}
-          echo is pre-release: ${{ needs.set-version.outputs.prerelease }}
-          echo is latest: ${{ needs.set-version.outputs.latest }}
+    - uses: actions/download-artifact@v8
+      with:
+        name: dstack-sshproxy
+        path: build
+    - run: |
+        ls -lR build
+        build/dstack-sshproxy --version

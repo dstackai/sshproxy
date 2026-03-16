@@ -26,8 +26,3 @@ jobs:
           name: dstack-sshproxy
           path: build/dstack-sshproxy
           retention-days: 1
-      - name: Report
-        run: |
-          echo 'version: ${{ inputs.version }}'
-          echo 'url: ${{ steps.upload.outputs.artifact-url }}'
-          echo 'digest: ${{ steps.upload.outputs.artifact-digest }}'

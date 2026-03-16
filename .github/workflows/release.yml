@@ -15,16 +15,36 @@ on:
         required: true
         type: string
 
-env:
-  VERSION: ${{ case(github.event_name == 'workflow_dispatch', inputs.version, github.ref_name) }}
-  PRERELEASE: ${{ contains(env.VERSION, 'a') || contains(env.VERSION, 'b') || contains(env.VERSION, 'rc') }}
-  LATEST: ${{ !env.PRERELEASE }}
-
 jobs:
+  set-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.set-version.outputs.version }}
+      prerelease: ${{ steps.set-version.outputs.prerelease }}
+      latest: ${{ steps.set-version.outputs.latest }}
+    steps:
+      - id: set-version
+        run: |
+          if [[ ${{ github.event_name }} = workflow_dispatch ]]; then
+            version=${{ inputs.version }}
+          else
+            version=${{ github.ref_name }}
+          fi
+          if echo $version | grep -E 'a|b|rc'; then
+            prerelease=true
+            latest=false
+          else
+            prerelease=false
+            latest=true
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
   report:
+    needs: [set-version]
     runs-on: ubuntu-latest
     steps:
       - run: |
-          echo version: $VERSION
-          echo is pre-release: $PRERELEASE
-          echo is latest: $LATEST
+          echo version: ${{ needs.set-version.outputs.version }}
+          echo is pre-release: ${{ needs.set-version.outputs.prerelease }}
+          echo is latest: ${{ needs.set-version.outputs.latest }}

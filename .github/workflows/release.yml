@@ -1,0 +1,30 @@
+name: Release
+
+on:
+  push:
+    tags:
+      # The project uses PEP 440 version scheme with N.N.N release segment,
+      # {a,b,rc}N pre-release segment and .postN post-release segment
+      - "[0-9]+.[0-9]+.[0-9]+[ab][0-9]+"
+      - "[0-9]+.[0-9]+.[0-9]+rc[0-9]+"
+      - "[0-9]+.[0-9]+.[0-9]+"
+      - "[0-9]+.[0-9]+.[0-9]+.post[0-9]+"
+  workflow_dispatch:
+    inputs:
+      version:
+        required: true
+        type: string
+
+env:
+  VERSION: ${{ case(github.event_name == 'workflow_dispatch', inputs.version, github.ref_name) }}
+  PRERELEASE: ${{ contains(env.VERSION, 'a') || contains(env.VERSION, 'b') || contains(env.VERSION, 'rc') }}
+  LATEST: ${{ !env.PRERELEASE }}
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo version: $VERSION
+          echo is pre-release: $PRERELEASE
+          echo is latest: $LATEST

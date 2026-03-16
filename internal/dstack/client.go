@@ -22,31 +22,6 @@ const getUpstreamURL = "/api/sshproxy/get_upstream"
 
 const errCodeNotExists = "resource_not_exists"
 
-type GetUpstreamRequest struct {
-	ID string `json:"id"`
-}
-
-type GetUpstreamResponse struct {
-	Hosts          []UpstreamHost `json:"hosts"`
-	AuthorizedKeys []string       `json:"authorized_keys"`
-}
-
-type UpstreamHost struct {
-	Host       string `json:"host"`
-	Port       int    `json:"port"`
-	User       string `json:"user"`
-	PrivateKey string `json:"private_key"`
-}
-
-type ErrorResponse struct {
-	Detail []ErrorDetail `json:"detail"`
-}
-
-type ErrorDetail struct {
-	Code string `json:"code"`
-	Msg  string `json:"msg"`
-}
-
 type APIError struct {
 	statusCode int
 	body       string
@@ -123,7 +98,11 @@ func (c *Client) GetUpstream(ctx context.Context, id string) (sshproxy.Upstream,
 
 		err := json.Unmarshal(respBytes, &respBody)
 		if err != nil {
-			logger.WithError(err).Debug("failed to decode error response")
+			var respBody TextErrorResponse
+
+			if err := json.Unmarshal(respBytes, &respBody); err != nil {
+				logger.WithError(err).Debug("failed to decode error response")
+			}
 		} else {
 			for _, detail := range respBody.Detail {
 				if detail.Code == errCodeNotExists {

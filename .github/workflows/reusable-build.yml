@@ -18,11 +18,14 @@ jobs:
           go-version-file: go.mod
           cache-dependency-path: go.sum
       - name: Build
+        env:
+          GOOS: linux
+          GOARCH: amd64
         run: |
-          scripts/build.sh build/dstack-sshproxy ${{ inputs.version }}
+          scripts/build.sh build/dstack-sshproxy-$GOOS-$GOARCH ${{ inputs.version }}
       - id: upload
         uses: actions/upload-artifact@v7
         with:
           name: dstack-sshproxy
-          path: build/dstack-sshproxy
+          path: build/dstack-sshproxy-*
           retention-days: 1

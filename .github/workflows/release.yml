@@ -47,14 +47,20 @@ jobs:
     with:
       version: ${{ needs.set-version.outputs.version }}
 
-  report:
-    needs: [build]
+  publish:
+    needs: [set-version, build]
     runs-on: ubuntu-latest
     steps:
     - uses: actions/download-artifact@v8
       with:
         name: dstack-sshproxy
         path: build
-    - run: |
-        ls -lR build
-        build/dstack-sshproxy --version
+    - name: Publish GitHub release
+      uses: softprops/action-gh-release@v2
+      with:
+        working_directory: build
+        files: dstack-sshproxy-*
+        tag_name: ${{ needs.set-version.outputs.version }}
+        generate_release_notes: true
+        prerelease: ${{ fromJSON(needs.set-version.outputs.prerelease) }}
+        make_latest: ${{ fromJSON(needs.set-version.outputs.latest) }}

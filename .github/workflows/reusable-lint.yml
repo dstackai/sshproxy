@@ -1,0 +1,22 @@
+name: Lint Code
+
+on:
+  workflow_call:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Check go.mod and go.sum
+        run: go mod tidy -diff
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.11.3  # Should match .pre-commit-config.yaml
+          args: --timeout=20m

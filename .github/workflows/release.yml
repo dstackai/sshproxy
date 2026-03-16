@@ -76,6 +76,9 @@ jobs:
     - run: |
         mv dstack-sshproxy-* dstack-sshproxy
       working-directory: build
+    - run: |
+        ls -la .
+        ls -la build
     - name: Set up QEMU
       uses: docker/setup-qemu-action@v4
     - name: Set up Docker Buildx

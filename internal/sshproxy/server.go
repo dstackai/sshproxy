@@ -29,6 +29,67 @@ const (
 	upstreamDialTimeout          = time.Second * 10
 )
 
+// allowed* algorithms are closely copied from the OpenSSH_10.0p2 Ubuntu-5ubuntu5.1 default config.
+// ssh.SupportedAlgorithms() returns almost the same, but the order slightly differs and some items are missing.
+// It was decided to explicitly list all algos instead of using library-provided defaults.
+// As a consequence, the lists must be periodically checked against the current version of OpenSSH
+// and updated if necessary.
+
+var allowedKeyExchanges = []string{
+	ssh.KeyExchangeMLKEM768X25519,
+	ssh.KeyExchangeCurve25519,
+	ssh.KeyExchangeECDHP256,
+	ssh.KeyExchangeECDHP384,
+	ssh.KeyExchangeECDHP521,
+}
+
+var allowedCiphers = []string{
+	ssh.CipherChaCha20Poly1305,
+	ssh.CipherAES128GCM,
+	ssh.CipherAES256GCM,
+	ssh.CipherAES128CTR,
+	ssh.CipherAES192CTR,
+	ssh.CipherAES256CTR,
+}
+
+var allowedMACs = []string{
+	ssh.HMACSHA256ETM,
+	ssh.HMACSHA512ETM,
+	ssh.HMACSHA256,
+	ssh.HMACSHA512,
+	ssh.HMACSHA1,
+}
+
+var allowedPublicKeyAuthAlgorithms = []string{
+	ssh.KeyAlgoED25519,
+	ssh.KeyAlgoECDSA256,
+	ssh.KeyAlgoECDSA384,
+	ssh.KeyAlgoECDSA521,
+	ssh.KeyAlgoSKED25519,
+	ssh.KeyAlgoSKECDSA256,
+	ssh.KeyAlgoRSASHA512,
+	ssh.KeyAlgoRSASHA256,
+}
+
+var allowedHostKeyAlgorithms = []string{
+	ssh.CertAlgoED25519v01,
+	ssh.CertAlgoECDSA256v01,
+	ssh.CertAlgoECDSA384v01,
+	ssh.CertAlgoECDSA521v01,
+	ssh.CertAlgoSKED25519v01,
+	ssh.CertAlgoSKECDSA256v01,
+	ssh.CertAlgoRSASHA512v01,
+	ssh.CertAlgoRSASHA256v01,
+	ssh.KeyAlgoED25519,
+	ssh.KeyAlgoECDSA256,
+	ssh.KeyAlgoECDSA384,
+	ssh.KeyAlgoECDSA521,
+	ssh.KeyAlgoSKED25519,
+	ssh.KeyAlgoSKECDSA256,
+	ssh.KeyAlgoRSASHA512,
+	ssh.KeyAlgoRSASHA256,
+}
+
 var blacklistedGlobalRequests = []string{
 	// Host key update mechanism for SSH: https://www.ietf.org/archive/id/draft-miller-sshm-hostkey-update-02.html
 	// Reasons to blacklist:
@@ -87,7 +148,13 @@ func NewServer(
 ) *Server {
 	logger := log.GetLogger(ctx)
 	config := &ssh.ServerConfig{
-		ServerVersion: serverVersion,
+		Config: ssh.Config{
+			KeyExchanges: allowedKeyExchanges,
+			Ciphers:      allowedCiphers,
+			MACs:         allowedMACs,
+		},
+		PublicKeyAuthAlgorithms: allowedPublicKeyAuthAlgorithms,
+		ServerVersion:           serverVersion,
 	}
 
 	for _, key := range hostKeys {
@@ -363,11 +430,17 @@ func connectToUpstream(
 
 	for i, host := range upstream.hosts {
 		config := &ssh.ClientConfig{
+			Config: ssh.Config{
+				KeyExchanges: allowedKeyExchanges,
+				Ciphers:      allowedCiphers,
+				MACs:         allowedMACs,
+			},
 			User: host.user,
 			Auth: []ssh.AuthMethod{
 				ssh.PublicKeys(host.privateKey),
 			},
-			HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+			HostKeyCallback:   ssh.InsecureIgnoreHostKey(),
+			HostKeyAlgorithms: allowedHostKeyAlgorithms,
 		}
 
 		var netConn net.Conn

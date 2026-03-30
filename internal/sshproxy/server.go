@@ -429,6 +429,11 @@ func handleConnectionError(ctx context.Context, err error) {
 			"unmarshal error",
 			// https://github.com/golang/crypto/blob/982eaa62dfb7273603b97fc1835561450096f3bd/ssh/common.go#L382
 			"unexpected message type",
+			// https://github.com/golang/crypto/blob/982eaa62dfb7273603b97fc1835561450096f3bd/ssh/common.go#L387
+			// All errors collected in the wild are about `SSH_MSG_USERAUTH_REQUEST` (50), see `serverAuthenticate()`:
+			// https://github.com/golang/crypto/blob/982eaa62dfb7273603b97fc1835561450096f3bd/ssh/server.go#L530
+			// but we suppress all such errors as any malformed message is suspicious, esp. during authentication
+			"parse error in message type",
 		} {
 			if strings.Contains(errMsg, msg) {
 				logger.WithError(err).Debug("suspicious client")

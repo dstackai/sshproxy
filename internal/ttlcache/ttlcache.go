@@ -111,6 +111,7 @@ func (c *Cache[K, V]) doCleanup(interval time.Duration, stop <-chan struct{}) {
 			c.DeleteExpired()
 		case <-stop:
 			ticker.Stop()
+			return
 		}
 	}
 }

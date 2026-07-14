@@ -2,6 +2,7 @@ package sshproxy
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
@@ -90,18 +91,26 @@ var allowedHostKeyAlgorithms = []string{
 	ssh.KeyAlgoRSASHA256,
 }
 
-var blacklistedGlobalRequests = []string{
-	// Host key update mechanism for SSH: https://www.ietf.org/archive/id/draft-miller-sshm-hostkey-update-02.html
-	// Reasons to blacklist:
-	// 1. Signature check always fail as the signed data contains session identifier, which is not the same on client
-	// and upstream side, since they don't talk directly but through sshproxy (there are two SSH transport sessions
-	// with their own unique identifiers).
-	// 2. Even if it worked somehow, we don't want to inflate user's known_hosts file with garbage records,
-	// since container host keys are ephemeral -- they are generated on dstack-runner startup (= unique for each job).
-	"hostkeys",
-	"hostkeys-00@openssh.com",
-	"hostkeys-prove",
-	"hostkeys-prove-00@openssh.com",
+// Global request names for the host key update mechanism for SSH:
+// https://datatracker.ietf.org/doc/draft-ietf-sshm-hostkey-update/
+// The "-00@openssh.com" variants are the ones currently sent and understood by OpenSSH; the bare
+// names are the standardized ones the draft is moving towards.
+const (
+	hostKeysRequest             = "hostkeys"
+	hostKeysRequestOpenSSH      = "hostkeys-00@openssh.com"
+	hostKeysProveRequest        = "hostkeys-prove"
+	hostKeysProveRequestOpenSSH = "hostkeys-prove-00@openssh.com"
+	// hostKeysProvePreambleStd is a value of the first field of the structure signed for the standardized
+	// "hostkeys-prove" request. For the vendor-specific request the request name itself is used as the field's value.
+	hostKeysProvePreambleStd = "hostkeys-prove-0"
+)
+
+var blacklistedUpstreamToClientGlobalRequests = []string{
+	// Host keys advertised by the upstream running inside the job container are irrelevant to the client since
+	// our proxy is _not_ transparent -- the client connection is terminated on the proxy's side, the only keys used
+	// for KEX are our keys.
+	hostKeysRequest,
+	hostKeysRequestOpenSSH,
 }
 
 type direction string
@@ -144,6 +153,9 @@ func (e *upstreamAuthFailureError) Unwrap() error {
 type Server struct {
 	address string
 
+	hostPublicKeyBlobs     [][]byte
+	hostPublicKeyBlobToKey map[string]HostKey
+
 	getUpstream   GetUpstreamCallback
 	upstreamCache *ttlcache.Cache[string, Upstream]
 
@@ -172,17 +184,37 @@ func NewServer(
 		ServerVersion:           serverVersion,
 	}
 
+	publicKeyBlobs := make([][]byte, 0, len(hostKeys))
+	publicKeyBlobToKey := make(map[string]HostKey, len(hostKeys))
+	keyTypesSeen := make(map[string]struct{})
 	for _, key := range hostKeys {
-		logger.WithField("type", key.PublicKey().Type()).Debug("host key added")
-		config.AddHostKey(key)
+		publicKey := key.PublicKey()
+		keyType := publicKey.Type()
+		logger := logger.WithField("type", keyType).WithField("fp", ssh.FingerprintSHA256(publicKey))
+		publicKeyBlob := publicKey.Marshal()
+		if _, seen := publicKeyBlobToKey[string(publicKeyBlob)]; !seen {
+			if _, seen := keyTypesSeen[keyType]; !seen {
+				config.AddHostKey(key)
+				logger.Debug("host key added for KEX and advertisement")
+				keyTypesSeen[keyType] = struct{}{}
+			} else {
+				logger.Debug("host key added for advertisement only")
+			}
+			publicKeyBlobs = append(publicKeyBlobs, publicKeyBlob)
+			publicKeyBlobToKey[string(publicKeyBlob)] = key
+		} else {
+			logger.Debug("duplicate host key skipped")
+		}
 	}
 
 	server := Server{
-		address:       net.JoinHostPort(address, strconv.Itoa(port)),
-		getUpstream:   getUpstream,
-		upstreamCache: ttlcache.NewCache[string, Upstream](upstreamCacheTTL),
-		config:        config,
-		conns:         make(map[net.Conn]struct{}),
+		address:                net.JoinHostPort(address, strconv.Itoa(port)),
+		hostPublicKeyBlobToKey: publicKeyBlobToKey,
+		hostPublicKeyBlobs:     publicKeyBlobs,
+		getUpstream:            getUpstream,
+		upstreamCache:          ttlcache.NewCache[string, Upstream](upstreamCacheTTL),
+		config:                 config,
+		conns:                  make(map[net.Conn]struct{}),
 	}
 	server.config.PublicKeyCallback = server.publicKeyCallback
 
@@ -225,7 +257,7 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 
 		s.addConnection(conn)
 		s.connsWg.Go(func() {
-			handleConnection(log.WithLogger(ctx, logger), conn, s.config)
+			s.handleConnection(log.WithLogger(ctx, logger), conn)
 			s.removeConnection(conn)
 		})
 	}
@@ -308,7 +340,7 @@ func (s *Server) removeConnection(conn net.Conn) {
 	delete(s.conns, conn)
 }
 
-func handleConnection(ctx context.Context, conn net.Conn, config *ssh.ServerConfig) {
+func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 	logger := log.GetLogger(ctx)
 
 	defer func() {
@@ -318,7 +350,7 @@ func handleConnection(ctx context.Context, conn net.Conn, config *ssh.ServerConf
 		}
 	}()
 
-	clientConn, clientNewChans, clientReqs, err := ssh.NewServerConn(conn, config)
+	clientConn, clientNewChans, clientReqs, err := ssh.NewServerConn(conn, s.config)
 	if err != nil {
 		handleConnectionError(ctx, err)
 		return
@@ -347,14 +379,22 @@ func handleConnection(ctx context.Context, conn net.Conn, config *ssh.ServerConf
 		return
 	}
 
+	// Advertise our host keys now that the upstream is connected and we are about to start servicing
+	// the client's global requests, so the client's hostkeys-prove round-trip is answered promptly.
+	// Failure is non-fatal: it only means the client connection is broken, which the handlers below
+	// detect and tear down.
+	if err := advertiseHostKeys(ctx, clientConn, s.hostPublicKeyBlobs); err != nil {
+		logger.WithError(err).Error("failed to advertise host keys")
+	}
+
 	var wg sync.WaitGroup
 
 	wg.Go(func() {
-		bridgeGlobalRequests(ctx, clientToUpstream, clientReqs, upstreamConn)
+		handleClientToUpstreamGlobalRequests(ctx, clientReqs, clientConn, upstreamConn, s.hostPublicKeyBlobToKey)
 		// <-chan *Request (and <-chan NewChannel) is closed when an error is encountered,
 		// including closed connection, see x/crypto/ssh/mux.go, mux.loop()
 		// We close the upstream connection here to interrupt goroutines
-		// spawned by bridgeNewChannels -> handleChannel that io.Copy() stdout/stderr,
+		// spawned by handleNewChannels -> handleChannel that io.Copy() stdout/stderr,
 		// otherwise they may stuck trying to read from a Channel, as Channel.Read()
 		// doesn't fail after sending Channel.Close()
 		err := upstreamConn.Close()
@@ -365,10 +405,10 @@ func handleConnection(ctx context.Context, conn net.Conn, config *ssh.ServerConf
 		}
 	})
 	wg.Go(func() {
-		bridgeNewChannels(ctx, clientToUpstream, clientNewChans, upstreamConn)
+		handleNewChannels(ctx, clientToUpstream, clientNewChans, upstreamConn)
 	})
 	wg.Go(func() {
-		bridgeGlobalRequests(ctx, upstreamToClient, upstreamReqs, clientConn)
+		handleUpstreamToClientGlobalRequests(ctx, upstreamReqs, clientConn)
 
 		err := clientConn.Close()
 		if err != nil && !isClosedError(err) {
@@ -378,7 +418,7 @@ func handleConnection(ctx context.Context, conn net.Conn, config *ssh.ServerConf
 		}
 	})
 	wg.Go(func() {
-		bridgeNewChannels(ctx, upstreamToClient, upstreamNewChans, clientConn)
+		handleNewChannels(ctx, upstreamToClient, upstreamNewChans, clientConn)
 	})
 	wg.Wait()
 }
@@ -538,31 +578,57 @@ func connectToUpstream(
 	return conn, chans, reqs, nil
 }
 
-func bridgeGlobalRequests(ctx context.Context, dir direction, inReqs <-chan *ssh.Request, outConn ssh.Conn) {
-	logger := log.GetLogger(ctx).WithField("dir", dir)
+func handleClientToUpstreamGlobalRequests(
+	ctx context.Context,
+	inReqs <-chan *ssh.Request,
+	inConn ssh.Conn,
+	outConn ssh.Conn,
+	hostKeys map[string]HostKey,
+) {
+	logger := log.GetLogger(ctx).WithField("dir", clientToUpstream)
 	for req := range inReqs {
 		logger := logger.WithField("type", req.Type)
+		if req.Type == hostKeysProveRequest || req.Type == hostKeysProveRequestOpenSSH {
+			logger.Trace("hostkeys-prove global request")
+			err := proveHostKeys(ctx, req, inConn, hostKeys)
+			if err != nil && !isClosedError(err) {
+				logger.WithError(err).Error("failed to handle hostkeys-prove global request")
+			}
+		} else {
+			forwardGlobalRequest(log.WithLogger(ctx, logger), req, outConn)
+		}
+	}
+}
 
-		if slices.Contains(blacklistedGlobalRequests, req.Type) {
+func handleUpstreamToClientGlobalRequests(ctx context.Context, inReqs <-chan *ssh.Request, outConn ssh.Conn) {
+	logger := log.GetLogger(ctx).WithField("dir", upstreamToClient)
+	for req := range inReqs {
+		logger := logger.WithField("type", req.Type)
+		if slices.Contains(blacklistedUpstreamToClientGlobalRequests, req.Type) {
 			logger.Trace("blacklisted global request, ignoring")
 			if req.WantReply {
 				_ = req.Reply(false, nil)
 			}
 		} else {
-			logger.Trace("global request")
-			ok, payload, err := outConn.SendRequest(req.Type, req.WantReply, req.Payload)
-			if req.WantReply {
-				_ = req.Reply(ok, payload)
-			}
-
-			if err != nil && !isClosedError(err) {
-				logger.WithError(err).Error("failed to forward global request")
-			}
+			forwardGlobalRequest(log.WithLogger(ctx, logger), req, outConn)
 		}
 	}
 }
 
-func bridgeNewChannels(ctx context.Context, dir direction, inNewChans <-chan ssh.NewChannel, outConn ssh.Conn) {
+func forwardGlobalRequest(ctx context.Context, req *ssh.Request, outConn ssh.Conn) {
+	logger := log.GetLogger(ctx)
+	logger.Trace("global request")
+	ok, payload, err := outConn.SendRequest(req.Type, req.WantReply, req.Payload)
+	if req.WantReply {
+		_ = req.Reply(ok, payload)
+	}
+
+	if err != nil && !isClosedError(err) {
+		logger.WithError(err).Error("failed to forward global request")
+	}
+}
+
+func handleNewChannels(ctx context.Context, dir direction, inNewChans <-chan ssh.NewChannel, outConn ssh.Conn) {
 	logger := log.GetLogger(ctx)
 
 	var wg sync.WaitGroup
@@ -615,7 +681,7 @@ func handleChannel(ctx context.Context, dir direction, inNewChan ssh.NewChannel,
 		_, _ = io.Copy(inChan.Stderr(), outChan.Stderr())
 	})
 	outWg.Go(func() {
-		bridgeChannelRequests(ctx, dir.reverse(), outReqs, inChan)
+		handleChannelRequests(ctx, dir.reverse(), outReqs, inChan)
 	})
 
 	var inWg sync.WaitGroup
@@ -625,7 +691,7 @@ func handleChannel(ctx context.Context, dir direction, inNewChan ssh.NewChannel,
 		_ = outChan.CloseWrite()
 	})
 	inWg.Go(func() {
-		bridgeChannelRequests(ctx, dir, inReqs, outChan)
+		handleChannelRequests(ctx, dir, inReqs, outChan)
 	})
 
 	var wg sync.WaitGroup
@@ -645,7 +711,7 @@ func handleChannel(ctx context.Context, dir direction, inNewChan ssh.NewChannel,
 	logger.Trace("channel done")
 }
 
-func bridgeChannelRequests(ctx context.Context, dir direction, inReqs <-chan *ssh.Request, outConn ssh.Channel) {
+func handleChannelRequests(ctx context.Context, dir direction, inReqs <-chan *ssh.Request, outConn ssh.Channel) {
 	logger := log.GetLogger(ctx).WithField("dir", dir)
 	for req := range inReqs {
 		logger := logger.WithField("type", req.Type)
@@ -662,29 +728,124 @@ func bridgeChannelRequests(ctx context.Context, dir direction, inReqs <-chan *ss
 	}
 }
 
-func isClosedError(err error) bool {
-	return errors.Is(err, net.ErrClosed) || errors.Is(err, io.EOF)
-}
-
-func getSSHError(err error) error {
-	for {
-		if strings.HasPrefix(err.Error(), "ssh: ") {
-			return err
-		}
-		err = errors.Unwrap(err)
-		if err == nil {
-			break
-		}
+// advertiseHostKeys informs the client of the full set of host keys served by the proxy using the "hostkeys" global
+// request of the host key update mechanism. This lets clients learn newly added keys (and prune retired ones) for
+// zero-downtime host key rotation. It must be called once, after the client has authenticated.
+// hostPublicKeyBlobs is expected to be non-empty and free of duplicates.
+func advertiseHostKeys(ctx context.Context, conn ssh.Conn, hostPublicKeyBlobs [][]byte) error {
+	var payload []byte
+	for _, blob := range hostPublicKeyBlobs {
+		payload = appendSSHString(payload, blob)
 	}
 
+	// want_reply is false: the advertisement is fire-and-forget. The client follows up with a
+	// separate hostkeys-prove request for the subset of keys it wants us to prove ownership of.
+	if _, _, err := conn.SendRequest(hostKeysRequestOpenSSH, false, payload); err != nil {
+		return fmt.Errorf("send %s request: %w", hostKeysRequestOpenSSH, err)
+	}
+
+	log.GetLogger(ctx).WithField("count", len(hostPublicKeyBlobs)).Debug("advertised host keys")
 	return nil
 }
 
-func isClientAuthFailureError(err error) bool {
-	sshErr := getSSHError(err)
-	if sshErr == nil {
-		return false
+// proveHostKeys answers a client's "hostkeys-prove" request by signing, with each requested host
+// key, a proof that binds the key to this session. The client uses these proofs to safely add newly
+// advertised keys to its known_hosts. The reply is a signature per requested key, in request order.
+func proveHostKeys(ctx context.Context, req *ssh.Request, conn ssh.Conn, hostKeys map[string]HostKey) error {
+	// For RSA host keys the proof must use a signature algorithm compatible with the one negotiated
+	// during key exchange; other key types have a single native algorithm. See OpenSSH's
+	// server_input_hostkeys_prove() and draft-ietf-sshm-hostkey-update.
+	kexRSASigAlgo := rsaKEXSignatureAlgorithm(conn)
+	if kexRSASigAlgo == ssh.KeyAlgoRSA {
+		// ssh-rsa (RSA-SHA1) was negotiated during key exchange. The draft mandates failing the
+		// request rather than emitting an insecure SHA-1 proof; the client keeps its known_hosts
+		// as is and simply misses this round of rotation.
+		_ = req.Reply(false, nil)
+		return errors.New("refusing hostkeys-prove: insecure ssh-rsa negotiated during key exchange")
 	}
-	// https://github.com/golang/crypto/blob/982eaa62dfb7273603b97fc1835561450096f3bd/ssh/client_auth.go#L118
-	return strings.Contains(sshErr.Error(), "unable to authenticate")
+
+	preamble := hostKeysProvePreambleStd
+	if req.Type == hostKeysProveRequestOpenSSH {
+		preamble = hostKeysProveRequestOpenSSH
+	}
+
+	sessionID := conn.SessionID()
+
+	var reply []byte
+	proven := 0
+	payload := req.Payload
+	for len(payload) > 0 {
+		blob, rest, ok := parseSSHString(payload)
+		if !ok {
+			_ = req.Reply(false, nil)
+			return errors.New("malformed hostkeys-prove payload")
+		}
+		payload = rest
+
+		signer, found := hostKeys[string(blob)]
+		if !found {
+			// The client asked us to prove ownership of a key we don't serve.
+			_ = req.Reply(false, nil)
+			return fmt.Errorf("proof requested for unknown host key %s", blob)
+		}
+
+		signData := marshalHostKeyProof(preamble, sessionID, blob)
+		sig, err := signHostKeyProof(signer, signData, kexRSASigAlgo)
+		if err != nil {
+			_ = req.Reply(false, nil)
+			return fmt.Errorf("sign host key proof: %w", err)
+		}
+		reply = appendSSHString(reply, ssh.Marshal(sig))
+		proven++
+	}
+
+	if err := req.Reply(true, reply); err != nil {
+		return fmt.Errorf("reply to %s request: %w", req.Type, err)
+	}
+
+	log.GetLogger(ctx).WithField("count", proven).Trace("proved host keys")
+	return nil
+}
+
+// rsaKEXSignatureAlgorithm returns the host key algorithm negotiated during key exchange if it is
+// an RSA algorithm, otherwise an empty string.
+func rsaKEXSignatureAlgorithm(conn ssh.Conn) string {
+	switch algo := getNegotiatedHostKeyAlgorithm(conn); algo {
+	case ssh.KeyAlgoRSA, ssh.KeyAlgoRSASHA256, ssh.KeyAlgoRSASHA512:
+		return algo
+	default:
+		return ""
+	}
+}
+
+// signHostKeyProof signs the host key proof structure with signer. RSA keys use kexRSASigAlgo when
+// an RSA key was negotiated during key exchange, otherwise rsa-sha2-512; they never sign with the
+// insecure ssh-rsa (SHA-1) default returned by Signer.Sign. Other key types sign natively.
+func signHostKeyProof(signer HostKey, data []byte, kexRSASigAlgo string) (*ssh.Signature, error) {
+	if signer.PublicKey().Type() != ssh.KeyAlgoRSA {
+		return signer.Sign(rand.Reader, data)
+	}
+
+	algo := kexRSASigAlgo
+	if algo == "" {
+		algo = ssh.KeyAlgoRSASHA512
+	}
+	algoSigner, ok := signer.(ssh.AlgorithmSigner)
+	if !ok {
+		return nil, fmt.Errorf("RSA host key of type %T does not implement ssh.AlgorithmSigner", signer)
+	}
+	return algoSigner.SignWithAlgorithm(rand.Reader, data, algo)
+}
+
+// marshalHostKeyProof builds the structure signed for a single host key proof:
+//
+//	string    preamble ("hostkeys-prove-0" or "hostkeys-prove-00@openssh.com")
+//	string    session identifier
+//	string    host key blob
+func marshalHostKeyProof(preamble string, sessionID, hostKey []byte) []byte {
+	var buf []byte
+	buf = appendSSHString(buf, []byte(preamble))
+	buf = appendSSHString(buf, sessionID)
+	buf = appendSSHString(buf, hostKey)
+	return buf
 }
